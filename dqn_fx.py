@@ -38,7 +38,7 @@ TRAIN = True
 class Agent:
     def __init__(self, num_actions, len_input):
         self.num_actions = num_actions
-        self.len_input = len_input
+        self.len_input = len_input+1
         
         self.epsilon = epsilon_init
         self.epsilon_step = (epsilon_init - epsilon_fin) / exploration_steps
@@ -215,17 +215,18 @@ def load_chart():
 def main():
     chart = load_chart()
     env = Env_FX(chart, len_input)
-    agent = Agent(env.action_space.n, env.len_input)
-    for _ in range(num_episodes):
-        agent.start = time.time()
-        terminal = False
-        s = env.reset()
-        while not terminal:
-            action = agent.get_action(s)
-            s_, R, terminal = env.step(action)
-            #print(terminal)
-            agent.run(s, action, R, terminal, s_)
-            s = s_
+    agent = Agent(env.action_space.n, len_input)
+    if TRAIN:
+        for _ in range(num_episodes):
+            agent.start = time.time()
+            terminal = False
+            s = env.reset()
+            while not terminal:
+                action = agent.get_action(s)
+                s_, R, terminal = env.step(action)
+                #print(terminal)
+                agent.run(s, action, R, terminal, s_)
+                s = s_
 
 
 if __name__ == '__main__':
