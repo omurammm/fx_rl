@@ -34,14 +34,14 @@ class Env_FX:
         # buy
         if action == 1:
             if self.position < 0:
-                reward = int((-self.position - price)*100)
+                reward = -self.position - price
                 self.position = 0
             elif self.position == 0:
                 self.position = price
         # sell
         elif action == 2:
             if self.position > 0:
-                reward = int((price - self.position)*100)
+                reward = price - self.position
                 self.position = 0
             elif self.position == 0:
                 self.position = -price

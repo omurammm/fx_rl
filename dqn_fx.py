@@ -11,8 +11,9 @@ from collections import deque
 import tensorflow as tf
 import time
 from env_fx import Env_FX
+import matplotlib.pyplot as plt
 
-num_episodes = 10000
+num_episodes = 4
 initial_replay_size = 10000
 batch_size = 32
 replay_memory_size = 200000
@@ -113,7 +114,6 @@ class Agent:
         
     def get_action(self, s):
         action = self.repeated_action
-
         if self.t % act_interval == 0:
             if self.epsilon >= random.random() or self.t < initial_replay_size:
                 action = random.randrange(self.num_actions)
@@ -121,8 +121,18 @@ class Agent:
                 action = np.argmax(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
             self.repeated_action = action
         return action
+
+    def test_get_action(self, s):
+        action = self.repeated_action
+        if self.t % act_interval == 0:
+            action = np.argmax(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
+            self.repeated_action = action
+        return action
         
     def run(self, s, action, R, terminal, s_):
+
+        self.total_reward += R
+
         R = np.sign(R)
         
         self.replay_memory.append((s, action, R, s_, terminal))
@@ -136,7 +146,7 @@ class Agent:
             if self.t % target_update_interval == 0:
                 self.sess.run(self.update_target_network)
 
-        self.total_reward += R
+
         self.total_max_q += np.max(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
         self.duration += 1          
   
@@ -150,9 +160,9 @@ class Agent:
             else:
                 mode = 'exploit'
             
-            text = 'EPISODE: {0:6d} / TIMESTEP: {1:8d} / DURATION: {2:5d} / EPSILON: {3:.5f} / TOTAL_REWARD: {4:3.0f} / AVG_MAX_Q: {5:2.4f} / AVG_LOSS: {6:.5f} / MODE: {7} / STEP_PER_SECOND: {8:.1f}'.format(
+            text = 'EPISODE: {0:6d} / TIMESTEP: {1:8d} / DURATION: {2:5d} / EPSILON: {3:.5f} / TOTAL_PIPS: {4:3.0f} / AVG_MAX_Q: {5:2.4f} / AVG_LOSS: {6:.5f} / MODE: {7} / STEP_PER_SECOND: {8:.1f}'.format(
                 self.episode + 1, self.t, self.duration, self.epsilon,
-                self.total_reward, self.total_max_q / float(self.duration),
+                self.total_reward*100, self.total_max_q / float(self.duration),
                 self.total_loss / (float(self.duration) / float(train_interval)), mode, self.duration/elapsed)
             print(text)
 
@@ -212,21 +222,41 @@ def load_chart():
     f.close()
     return price
 
+def plot_pips(rewards):
+    rewards = np.array(rewards)*100
+    plt.plot(rewards)
+    plt.savefig('pips')
+    plt.show()
+
+
 def main():
     chart = load_chart()
-    env = Env_FX(chart, len_input)
+    env = Env_FX(chart[:2000], len_input)
     agent = Agent(env.action_space.n, len_input)
     if TRAIN:
         for _ in range(num_episodes):
             agent.start = time.time()
             terminal = False
             s = env.reset()
+            rr = 0
             while not terminal:
                 action = agent.get_action(s)
                 s_, R, terminal = env.step(action)
-                #print(terminal)
+                rr += R
                 agent.run(s, action, R, terminal, s_)
                 s = s_
+
+    terminal = False
+    s = env.reset()
+    rewards = [0]
+    env_test = Env_FX(chart[2000:], len_input)
+    while not terminal:
+        action = agent.test_get_action(s)
+        s_, R, terminal = env_test.step(action)
+        rewards.append(rewards[-1]+R)
+        agent.run(s, action, R, terminal, s_)
+        s = s_
+    plot_pips(rewards)
 
 
 if __name__ == '__main__':
