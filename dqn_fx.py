@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-
-import csv
 import random
 from keras.models import Sequential
 from keras.layers import Conv2D, Flatten, Dense
@@ -13,10 +11,10 @@ import time
 from env_fx import Env_FX
 import matplotlib.pyplot as plt
 
-num_episodes = 4
-initial_replay_size = 10000
+num_episodes = 30
+initial_replay_size = 100000
 batch_size = 32
-replay_memory_size = 200000
+replay_memory_size = 100000
 act_interval = 1
 train_interval = 1
 target_update_interval = 10000
@@ -28,11 +26,11 @@ learning_rate = 0.00025
 
 
 epsilon_init = 1.0
-epsilon_fin = 0.1
-exploration_steps = 100000
+epsilon_fin = 0.05
+exploration_steps = 1000000
 gamma = 0.99
 
-len_input = 10
+len_input = 100
 TRAIN = True
 
 
@@ -82,8 +80,8 @@ class Agent:
         
     def network(self):
         model = Sequential()
-        model.add(Dense(10, activation='relu', input_dim=self.len_input))
-        model.add(Dense(10, activation='relu'))
+        model.add(Dense(32, activation='relu', input_dim=self.len_input))
+        model.add(Dense(32, activation='relu'))
         model.add(Dense(self.num_actions, activation='linear'))
         
         s = tf.placeholder(tf.float32, [None, self.len_input])
@@ -212,13 +210,20 @@ class Agent:
 
 
 def load_chart():
-    f = open("USDJPY.csv",encoding="shiftjis")
-    reader = csv.reader(f)
-    next(reader)
+    f = open("USDJPY.txt")
+    line = f.readline()
+    line = f.readline()
 
+    start = "20180103"
     price = []
-    for row in reader:
-        price.append(float(row[4]))
+    f_append = False
+    while line:
+        if start in line:
+            f_append = True
+
+        if f_append:
+            price.append(float(line.split(",")[-2]))
+        line = f.readline()
     f.close()
     return price
 
@@ -230,34 +235,38 @@ def plot_pips(rewards):
 
 
 def main():
+    print("Data Loading...")
+    # all len : 6155990, 2010 - len : 3091974
     chart = load_chart()
-    env = Env_FX(chart[:2000], len_input)
+    print("End!!")
+    num_train = int(len(chart)*0.9)
+    env = Env_FX(chart[:num_train], len_input)
     agent = Agent(env.action_space.n, len_input)
     if TRAIN:
         for _ in range(num_episodes):
             agent.start = time.time()
             terminal = False
             s = env.reset()
-            rr = 0
             while not terminal:
                 action = agent.get_action(s)
                 s_, R, terminal = env.step(action)
-                rr += R
                 agent.run(s, action, R, terminal, s_)
                 s = s_
 
+
+    env_test = Env_FX(chart[num_train:], len_input)
+    #for _ in range(10):
     terminal = False
-    s = env.reset()
+    s = env_test.reset()
     rewards = [0]
-    env_test = Env_FX(chart[2000:], len_input)
+
     while not terminal:
         action = agent.test_get_action(s)
         s_, R, terminal = env_test.step(action)
         rewards.append(rewards[-1]+R)
-        agent.run(s, action, R, terminal, s_)
+        #agent.run(s, action, R, terminal, s_)
         s = s_
     plot_pips(rewards)
-
 
 if __name__ == '__main__':
     main()
