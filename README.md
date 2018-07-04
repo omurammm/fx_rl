@@ -13,7 +13,7 @@ wget http://www.forextester.com/templates/data/files/USDJPY.zip
 unzip USDJPY.zip
 ```
 
-### Runnning
+## Runnning
 ```
 python dqn_fx.py
 ```
