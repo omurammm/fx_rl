@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import os
 import random
 from keras.models import Sequential
 from keras.layers import Conv2D, Flatten, Dense
@@ -11,10 +12,15 @@ import time
 from env_fx import Env_FX
 import matplotlib.pyplot as plt
 
-num_episodes = 30
+
+ENV_NAME = "fx_dqn"
+
+spread = 0.003 # yen
+
+num_episodes = 60
 initial_replay_size = 100000
 batch_size = 32
-replay_memory_size = 100000
+replay_memory_size = 200000
 act_interval = 1
 train_interval = 1
 target_update_interval = 10000
@@ -27,11 +33,16 @@ learning_rate = 0.00025
 
 epsilon_init = 1.0
 epsilon_fin = 0.05
-exploration_steps = 1000000
+exploration_steps = 2000000
 gamma = 0.99
 
 len_input = 100
 TRAIN = True
+LOAD = False
+save_interval = 5000000
+save_path = 'saved_networks/' + ENV_NAME
+
+
 
 
 class Agent:
@@ -70,8 +81,16 @@ class Agent:
         
         self.sess = tf.InteractiveSession()
 
+        self.saver = tf.train.Saver(q_network_weights)
+
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
 
         self.sess.run(tf.global_variables_initializer())
+
+        # Load network
+        if LOAD:
+            self.load_network()
 
 
         # Initialize target network
@@ -80,8 +99,8 @@ class Agent:
         
     def network(self):
         model = Sequential()
-        model.add(Dense(32, activation='relu', input_dim=self.len_input))
-        model.add(Dense(32, activation='relu'))
+        model.add(Dense(400, activation='relu', input_dim=self.len_input))
+        model.add(Dense(300, activation='relu'))
         model.add(Dense(self.num_actions, activation='linear'))
         
         s = tf.placeholder(tf.float32, [None, self.len_input])
@@ -126,13 +145,21 @@ class Agent:
             action = np.argmax(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
             self.repeated_action = action
         return action
+
+    def load_network(self):
+        checkpoint = tf.train.get_checkpoint_state(save_path)
+        if checkpoint and checkpoint.model_checkpoint_path:
+            self.saver.restore(self.sess, checkpoint.model_checkpoint_path)
+            print('Successfully loaded: ' + checkpoint.model_checkpoint_path)
+        else:
+            print('Training new network...')
         
     def run(self, s, action, R, terminal, s_):
 
         self.total_reward += R
 
         R = np.sign(R)
-        
+
         self.replay_memory.append((s, action, R, s_, terminal))
         if len(self.replay_memory) > replay_memory_size:
             self.replay_memory.popleft()
@@ -143,6 +170,11 @@ class Agent:
 
             if self.t % target_update_interval == 0:
                 self.sess.run(self.update_target_network)
+
+            # Save network
+            if self.t % save_interval == 0:
+                path = self.saver.save(self.sess, save_path + '/' + ENV_NAME, global_step=(self.t))
+                print('Successfully saved: ' + path)
 
 
         self.total_max_q += np.max(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
@@ -165,7 +197,7 @@ class Agent:
             print(text)
 
             with open('fx_output.txt','a') as f:
-                f.write(text)
+                f.write(text+"\n")
 
             self.total_reward = 0
             self.total_max_q = 0
@@ -240,7 +272,7 @@ def main():
     chart = load_chart()
     print("End!!")
     num_train = int(len(chart)*0.9)
-    env = Env_FX(chart[:num_train], len_input)
+    env = Env_FX(chart[:num_train], len_input, spread)
     agent = Agent(env.action_space.n, len_input)
     if TRAIN:
         for _ in range(num_episodes):
@@ -254,7 +286,7 @@ def main():
                 s = s_
 
 
-    env_test = Env_FX(chart[num_train:], len_input)
+    env_test = Env_FX(chart[num_train:], len_input, spread)
     #for _ in range(10):
     terminal = False
     s = env_test.reset()

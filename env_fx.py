@@ -5,10 +5,11 @@ import random
 import numpy as np
 
 class Env_FX:
-    def __init__(self, chart, len_input):
+    def __init__(self, chart, len_input, spread):
         self.chart_raw, self.chart_diff = self._arrange_chart(chart, len_input)
         self.action_space = ActionSpace(3)
         self.len_input = len_input
+        self.spread = spread
 
         self.idx = 0
         self.position = 0
@@ -38,13 +39,15 @@ class Env_FX:
                 self.position = 0
             elif self.position == 0:
                 self.position = price
+                #reward = - self.spread
         # sell
         elif action == 2:
             if self.position > 0:
-                reward = price - self.position
+                reward = (price - self.spread) - self.position
                 self.position = 0
             elif self.position == 0:
-                self.position = -price
+                self.position = - (price - self.spread)
+                #reward = - self.spread
 
         self.idx += 1
         if self.idx == len(self.chart_raw):
