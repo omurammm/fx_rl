@@ -1,4 +1,4 @@
-# fx_rl
+# rl_trading
 
 FX trading systems with deep reinforcement learning. 
 
