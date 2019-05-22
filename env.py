@@ -5,15 +5,24 @@ import random
 import numpy as np
 
 class Env:
-    def __init__(self, chart, len_input, spread, action_type='move', reward_type='unrealized', positions=[-1,0,1]):
+    def __init__(self, chart, feature_charts, len_input, spread, action_type='move', reward_type='unrealized', positions=[-1,0,1]):
+
         self.chart_raw, self.chart_diff = self._arrange_chart(chart, len_input)
+        self.feature_charts = []
+        for feature in feature_charts:
+            raw, _ = self._arrange_chart(feature, len_input)
+            self.feature_charts.append(raw)
+        self.feature_charts = np.array(self.feature_charts)
+
         self.action_space = ActionSpace(len(positions))
+
         self.len_input = len_input
         self.spread = spread
 
         self.idx = 0
         self.position = 0
         self.position_price = 0
+        self.terminal = False
 
         # 'move' or 'do'  : only 'move' now
         self.action_type = action_type
@@ -23,6 +32,8 @@ class Env:
 
         self.positions = positions
 
+        self.position_history = np.zeros(len_input)
+
     def _arrange_chart(self, chart, len_input):
         chart_diff_ = list(np.array(chart[1:]) - np.array(chart[:-1]))
         chart = chart[1:]
@@ -31,7 +42,7 @@ class Env:
         for i in range(len(chart)-len_input+1):
             chart_raw.append(chart[i:i+len_input])
             chart_diff.append(chart_diff_[i:i+len_input])
-        return chart_raw, chart_diff
+        return np.array(chart_raw), np.array(chart_diff)
 
     # def deal(self, to_position, price):
     #     self.position = to_position
@@ -40,14 +51,20 @@ class Env:
     def reset(self):
         self.idx = 0
         self.position = 0
-        return self.chart_diff[0] + [0]
+        self.terminal = False
+        if len(self.feature_charts)!=0:
+            state = np.concatenate((np.stack((self.chart_raw[self.idx], self.position_history)),self.feature_charts[:,self.idx,:]))
+        else:
+            state = np.stack((self.chart_raw[self.idx], self.position_history))
+        return state
 
 
     def step(self, action):
-
         pre_position = self.position
         # action_type == 'move'
         self.position = action
+
+        self.position_history = np.concatenate((self.position_history[1:], [self.position]))
 
         pre_price = self.chart_raw[self.idx][-2]
         price = self.chart_raw[self.idx][-1]
@@ -70,11 +87,17 @@ class Env:
 
                 self.position_price = price
 
-        self.idx += 1
-        if self.idx == len(self.chart_raw):
-            return (self.chart_diff[self.idx-1]+[self.position], reward, True)
+
+        if self.idx == len(self.chart_raw)-1:
+            self.terminal = True
         else:
-            return (self.chart_diff[self.idx]+[self.position], reward, False)
+            self.idx += 1
+
+        if len(self.feature_charts)!=0:
+            state = np.concatenate((np.stack((self.chart_raw[self.idx], self.position_history)),self.feature_charts[:,self.idx,:]))
+        else:
+            state = np.stack((self.chart_raw[self.idx], self.position_history))
+        return (state, reward, self.terminal)
 
 
 
