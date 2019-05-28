@@ -5,13 +5,31 @@ import random
 import numpy as np
 
 class Env:
-    def __init__(self, chart, feature_charts, len_input, spread, action_type='move', reward_type='unrealized', positions=[-1,0,1]):
+    def __init__(self,
+                 chart,
+                 feature_charts,
+                 len_input,
+                 spread,
+                 action_type='move',
+                 reward_type='unrealized',
+                 positions=[-1,0,1],
+                 raw_or_diff='diff'):
 
         self.chart_raw, self.chart_diff = self._arrange_chart(chart, len_input)
         self.feature_charts = []
+        self.raw_or_diff = raw_or_diff
         for feature in feature_charts:
-            raw, _ = self._arrange_chart(feature, len_input)
-            self.feature_charts.append(raw)
+            raw, diff = self._arrange_chart(feature, len_input)
+            if raw_or_diff=='raw':
+                self.feature_charts.append(raw)
+            elif raw_or_diff=='diff':
+                self.feature_charts.append(diff)
+
+        if raw_or_diff=='raw':
+            self.chart = self.chart_raw
+        elif raw_or_diff=='diff':
+            self.chart = self.chart_diff
+
         self.feature_charts = np.array(self.feature_charts)
 
         self.action_space = ActionSpace(len(positions))
@@ -53,9 +71,9 @@ class Env:
         self.position = 0
         self.terminal = False
         if len(self.feature_charts)!=0:
-            state = np.concatenate((np.stack((self.chart_raw[self.idx], self.position_history)),self.feature_charts[:,self.idx,:]))
+            state = np.concatenate((np.stack((self.chart[self.idx], self.position_history)),self.feature_charts[:,self.idx,:]))
         else:
-            state = np.stack((self.chart_raw[self.idx], self.position_history))
+            state = np.stack((self.chart[self.idx], self.position_history))
         return state
 
 
@@ -71,6 +89,8 @@ class Env:
 
         post_price = self.chart_raw[self.idx+1][-1] if (self.idx+1)!=len(self.chart_raw) else price
 
+
+        # TODO: 買い売り両方でspreadがかかる場合のみ実装されている。FXには使えない
         if self.reward_type == 'unrealized':
             commission = np.abs(self.position-pre_position) * self.spread
             reward = (post_price - price) * self.position - commission
@@ -88,145 +108,16 @@ class Env:
                 self.position_price = price
 
 
-        if self.idx == len(self.chart_raw)-1:
+        if self.idx == len(self.chart)-1:
             self.terminal = True
         else:
             self.idx += 1
 
         if len(self.feature_charts)!=0:
-            state = np.concatenate((np.stack((self.chart_raw[self.idx], self.position_history)),self.feature_charts[:,self.idx,:]))
+            state = np.concatenate((np.stack((self.chart[self.idx], self.position_history)),self.feature_charts[:,self.idx,:]))
         else:
-            state = np.stack((self.chart_raw[self.idx], self.position_history))
+            state = np.stack((self.chart[self.idx], self.position_history))
         return (state, reward, self.terminal)
-
-
-
-    # def step_legacy(self, action):
-    #     reward = 0
-    #     price = self.chart_raw[self.idx][-1]
-    #     # buy : 1
-    #     if action == 1:
-    #         if self.position == 0:
-    #             self.deal(1, price)
-    #
-    #         elif self.position == 1:
-    #             pass
-    #
-    #         elif self.position == 3:
-    #             reward = (price-self.spread - self.position_price) * 2
-    #             self.position = 1
-    #             #self.deal(1, price)
-    #
-    #         # position : -1 or -3 => 1
-    #         # $2 sell
-    #         elif self.position < 0:
-    #             reward = (price - self.position_price) * self.position
-    #             self.deal(1, price)
-    #
-    #     # buy : 3
-    #     if action == 2:
-    #         if self.position == 0:
-    #             self.deal(3, price)
-    #
-    #         elif self.position == 1:
-    #             # TODO: 買い増し、売り増しどうしよう、とりあえず一旦決済してから増す
-    #             reward = (price-self.spread - self.position_price) * self.position
-    #             self.deal(3, price)
-    #
-    #         elif self.position == 3:
-    #             pass
-    #             # self.position = 1
-    #             # reward = (price - self.position_price) * 2
-    #
-    #         # position : -1 or -3 => 1
-    #         elif self.position < 0:
-    #             reward = (price - self.position_price) * self.position
-    #             self.deal(3, price)
-    #
-    #     # sell : -1
-    #     if action == 3:
-    #         price -= self.spread
-    #
-    #         if self.position == 0:
-    #             self.deal(-1, price)
-    #
-    #         elif self.position > 0:
-    #             reward = (price - self.position_price) * self.position
-    #             self.deal(-1, price)
-    #
-    #         elif self.position == -1:
-    #             pass
-    #         elif self.position == -3:
-    #             reward = (price+self.spread - self.position_price) * (-2)
-    #             self.position = -1
-    #             #self.deal(-1, price)
-    #
-    #
-    #     # sell : -3
-    #     if action == 4:
-    #         price -= self.spread
-    #         if self.position == 0:
-    #             self.deal(-3, price)
-    #
-    #         elif self.position > 0:
-    #             reward = (price - self.position_price) * self.position
-    #             self.deal(-3, price)
-    #
-    #         elif self.position == -1:
-    #             # TODO: 買い増し、売り増しどうしよう、とりあえず一旦決済してから増す
-    #             reward = (price+self.spread - self.position_price) * self.position
-    #             self.deal(-3, price)
-    #
-    #         elif self.position == -3:
-    #             pass
-    #
-    #     # stay
-    #     if action == 0:
-    #         if self.position == 0:
-    #             pass
-    #
-    #         elif self.position < 0:
-    #             reward = (price - self.position_price) * self.position
-    #             self.deal(0, 0)
-    #
-    #         elif self.position > 0:
-    #             reward = (price-self.spread - self.position_price) * self.position
-    #             self.deal(0, 0)
-    #
-    #     self.idx += 1
-    #     if self.idx == len(self.chart_raw):
-    #         return (self.chart_diff[self.idx-1]+[self.position], reward, True)
-    #     else:
-    #         return (self.chart_diff[self.idx]+[self.position], reward, False)
-    #
-    #
-
-
-            # def step(self, action):
-    #     reward = 0
-    #     price = self.chart_raw[self.idx][-1]
-    #     # buy
-    #     if action == 1:
-    #         if self.position < 0:
-    #             reward = -self.position - price
-    #             self.position = 0
-    #         elif self.position == 0:
-    #             self.position = price
-    #             #reward = - self.spread
-    #     # sell
-    #     elif action == 2:
-    #         if self.position > 0:
-    #             reward = (price - self.spread) - self.position
-    #             self.position = 0
-    #         elif self.position == 0:
-    #             self.position = - (price - self.spread)
-    #             #reward = - self.spread
-    #
-    #     self.idx += 1
-    #     if self.idx == len(self.chart_raw):
-    #         return (self.chart_diff[self.idx-1]+[np.sign(self.position)], reward, True)
-    #     else:
-    #         return (self.chart_diff[self.idx]+[np.sign(self.position)], reward, False)
 
 
 

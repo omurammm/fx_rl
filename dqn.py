@@ -14,68 +14,58 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import datetime
 import argparse
+import glob
 
 
-from logging import getLogger, StreamHandler, DEBUG, FileHandler
-logger = getLogger('testtest')
-handler = StreamHandler()
-handler.setLevel(DEBUG)
-logger.setLevel(DEBUG)
-logger.addHandler(handler)
-fh = FileHandler('test.log')
-logger.addHandler(fh)
-logger.propagate = False
-
-logger.debug('hello')
-
-
-ENV_NAME = "fx_dqn"
-
-# spread = 0.003 # yen
-spread = 0
-
-num_episodes = 300
-initial_replay_size = 5000
-batch_size = 32
-replay_memory_size = 20000
-act_interval = 1
-train_interval = 1
-target_update_interval = 2000
-
-
-epsilon_optimizer = 1.5e-7
-momentum = 0.95
-learning_rate = 0.00025
-
-
-epsilon_init = 1.0
-epsilon_fin = 0.05
-test_epsilon = 0.05
-exploration_steps = 100000
-gamma = 0.99
-
-len_input = 100
-TRAIN = True
-LOAD = False
-save_interval = 5000000
-save_path = 'saved_networks/' + ENV_NAME
-
-
-
+# from logging import getLogger, StreamHandler, DEBUG, FileHandler
+# logger = getLogger('testtest')
+# handler = StreamHandler()
+# handler.setLevel(DEBUG)
+# logger.setLevel(DEBUG)
+# logger.addHandler(handler)
+# fh = FileHandler('test.log')
+# logger.addHandler(fh)
+# logger.propagate = False
+#
+# logger.debug('hello')
 
 
 
 class Agent:
-    def __init__(self, num_actions, len_input, args):
+    def __init__(self, num_actions, args):
         self.num_actions = num_actions
-        self.len_input = len_input
+        self.len_input = args.len_input
         self.num_features = 2+len(args.features)
 
 
-        self.epsilon = epsilon_init
-        self.epsilon_step = (epsilon_init - epsilon_fin) / exploration_steps
+        self.save_name = args.save_name
+        self.save_path = args.save_path
+        self.save_interval = args.save_interval
+
+
+
+        self.initial_memory_size = args.initial_memory_size
+        self.replay_memory_size = args.replay_memory_size
+
+        self.gamma = args.gamma
+        self.target_update_interval = args.target_update_interval
+        self.act_interval = args.act_interval
+        self.train_interval = args.train_interval
+        self.epsilon_init = args.epsilon_init
+        self.epsilon_fin = args.epsilon_fin
+        self.epsilon_test = args.epsilon_test
+
+        self.epsilon = args.epsilon_init
+        self.epsilon_step = (self.epsilon_init - self.epsilon_fin) / args.exploration_steps
         self.t = 0
         self.repeated_action = 0
+        self.exploration_steps = args.exploration_steps
+
+
+
+        self.batch_size = args.batch_size
+        self.lr = args.lr
+
 
         # Parameters used for summary
         self.total_reward = 0
@@ -105,13 +95,10 @@ class Agent:
 
         self.saver = tf.train.Saver(q_network_weights)
 
-        if not os.path.exists(save_path):
-            os.makedirs(save_path)
-
         self.sess.run(tf.global_variables_initializer())
 
         # Load network
-        if LOAD:
+        if args.LOAD:
             self.load_network()
 
 
@@ -126,11 +113,11 @@ class Agent:
         # model.add(Dense(self.num_actions, activation='linear'))
 
         chart = Input(shape=(self.num_features,self.len_input))
-        lstm = LSTM(8)(chart)
-        output = Dense(3)(lstm)
+        lstm = LSTM(3)(chart)
+        # output = Dense(3)(lstm)
 
         s = tf.placeholder(tf.float32, [None, self.num_features, self.len_input])
-        model = Model(inputs=chart, outputs=output)
+        model = Model(inputs=chart, outputs=lstm)
         q_values = model(s)
         
         return s, q_values, model
@@ -150,7 +137,7 @@ class Agent:
         linear_part = error - quadratic_part
         loss = tf.reduce_mean(0.5 * tf.square(quadratic_part) + linear_part)
 
-        optimizer = tf.train.RMSPropOptimizer(learning_rate, momentum=momentum, epsilon=epsilon_optimizer)
+        optimizer = tf.train.RMSPropOptimizer(self.lr, momentum=0.95, epsilon=1.5e-7)
         grad_update = optimizer.minimize(loss, var_list=q_network_weights)
 
         return action, y, loss, grad_update
@@ -158,8 +145,8 @@ class Agent:
         
     def get_action(self, s):
         action = self.repeated_action
-        if self.t % act_interval == 0:
-            if self.epsilon >= random.random() or self.t < initial_replay_size:
+        if self.t % self.act_interval == 0:
+            if self.epsilon >= random.random() or self.t < self.initial_memory_size:
                 action = random.randrange(self.num_actions)
             else:
                 action = np.argmax(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
@@ -168,8 +155,8 @@ class Agent:
 
     def test_get_action(self, s):
         action = self.repeated_action
-        if self.t % act_interval == 0:
-            if test_epsilon >= random.random():
+        if self.t % self.act_interval == 0:
+            if self.epsilon_test >= random.random():
                 action = random.randrange(self.num_actions)
             else:
                 action = np.argmax(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
@@ -177,7 +164,7 @@ class Agent:
         return action
 
     def load_network(self):
-        checkpoint = tf.train.get_checkpoint_state(save_path)
+        checkpoint = tf.train.get_checkpoint_state(self.save_path)
         if checkpoint and checkpoint.model_checkpoint_path:
             self.saver.restore(self.sess, checkpoint.model_checkpoint_path)
             print('Successfully loaded: ' + checkpoint.model_checkpoint_path)
@@ -185,25 +172,26 @@ class Agent:
             print('Training new network...')
         
     def run(self, s, action, R, terminal, s_):
+        # print(self.t,"\r")
 
         self.total_reward += R
 
         R = np.sign(R)
 
         self.replay_memory.append((s, action, R, s_, terminal))
-        if len(self.replay_memory) > replay_memory_size:
+        if len(self.replay_memory) > self.replay_memory_size:
             self.replay_memory.popleft()
             
-        if self.t >= initial_replay_size:
-            if self.t % train_interval == 0:
+        if self.t >= self.initial_memory_size:
+            if self.t % self.train_interval == 0:
                 self.train()
 
-            if self.t % target_update_interval == 0:
+            if self.t % self.target_update_interval == 0:
                 self.sess.run(self.update_target_network)
 
             # Save network
-            if self.t % save_interval == 0:
-                path = self.saver.save(self.sess, save_path + '/' + ENV_NAME, global_step=(self.t))
+            if self.t % self.save_interval == 0:
+                path = self.saver.save(self.sess, self.save_path+'/'+self.save_name, global_step=(self.t))
                 print('Successfully saved: ' + path)
 
         self.total_max_q += np.max(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
@@ -212,9 +200,9 @@ class Agent:
         if terminal:
             #Debug
             elapsed = time.time() - self.start
-            if self.t < initial_replay_size:
+            if self.t < self.initial_memory_size:
                 mode = 'random'
-            elif initial_replay_size <= self.t < initial_replay_size + exploration_steps:
+            elif self.initial_memory_size <= self.t < self.initial_memory_size + self.exploration_steps:
                 mode = 'explore'
             else:
                 mode = 'exploit'
@@ -222,11 +210,11 @@ class Agent:
             text = 'EPISODE: {0:6d} / TIMESTEP: {1:8d} / DURATION: {2:5d} / EPSILON: {3:.5f} / TOTAL_REWARD: {4:3.2f} / AVG_MAX_Q: {5:2.4f} / AVG_LOSS: {6:.5f} / MODE: {7} / STEP_PER_SECOND: {8:.1f}'.format(
                 self.episode + 1, self.t, self.duration, self.epsilon,
                 self.total_reward, self.total_max_q / float(self.duration),
-                self.total_loss / (float(self.duration) / float(train_interval)), mode, self.duration/elapsed)
+                self.total_loss / (float(self.duration) / float(self.train_interval)), mode, self.duration/elapsed)
             print(text)
 
-            with open('fx_output.txt','a') as f:
-                f.write(text+"\n")
+            # with open('log/{}.txt'.format(self.save_name),'a') as f:
+            f_log.write(text+"\n")
 
             self.total_reward = 0
             self.total_max_q = 0
@@ -235,7 +223,7 @@ class Agent:
             self.episode += 1
 
         self.t += 1
-        if self.epsilon > epsilon_fin and self.t >= initial_replay_size:
+        if self.epsilon > self.epsilon_fin and self.t >= self.initial_memory_size:
             self.epsilon -= self.epsilon_step
             
     def train(self):
@@ -247,7 +235,7 @@ class Agent:
         y_batch = []
 
         # Sample random minibatch of transition from replay memory
-        minibatch = random.sample(self.replay_memory, batch_size)
+        minibatch = random.sample(self.replay_memory, self.batch_size)
         for data in minibatch:
             s_batch.append(data[0])
             action_batch.append(data[1])
@@ -258,7 +246,7 @@ class Agent:
         # Convert True to 1, False to 0
         terminal_batch = np.array(terminal_batch) + 0
         target_q_values_batch = self.target_q_values.eval(feed_dict={self.st: np.float32(np.array(next_s_batch))})
-        y_batch = R_batch + (1 - terminal_batch) * gamma * np.max(target_q_values_batch, axis=1)
+        y_batch = R_batch + (1 - terminal_batch) * self.gamma * np.max(target_q_values_batch, axis=1)
         loss, _ = self.sess.run([self.loss, self.grad_update], feed_dict={
             self.s: np.float32(np.array(s_batch)),
             self.action: action_batch,
@@ -277,14 +265,14 @@ def load_chart(target, start, end, dates=None):
         end = '20190424' if end==0 else end
         return load_fx(start, end, dates)
 
-
     elif 'gold' in target or 'silver' in target:
-
         return load_material(start, end, material=target, dates=dates)
 
     elif target in ['wpm']:
-
         return load_stock(start, end, stock=target, dates=dates)
+
+    elif target.isdecimal():
+        return load_tocom(start, end, commodity_num=int(target), dates=dates)
 
 def load_fx(start="20180103", end=None):
     f = open("USDJPY20010102_20180626.txt")
@@ -340,7 +328,8 @@ def load_material(start, end, material='goldUSD', dates=None):
     df = df[end_loc:start_loc+1]
     price = df['price']
     chart = price.str.replace(',','').astype(float)
-    chart = list(chart/max(chart))
+    # chart = list(chart*100/max(chart))
+    chart = list(chart)
     dates = list(df['date'])
 
     return chart, dates
@@ -361,9 +350,45 @@ def load_stock(start, end, stock, dates=None):
     df = df[start_loc:end_loc+1]
     price = df['close'].astype(str)
     chart = price.str.replace(',','').astype(float)
-    chart = list(chart/max(chart))
+    # chart = list(chart/max(chart))
+    chart = list(chart)
     dates = list(df['date'])
     return chart, dates
+
+def get_dateAndprice(commodity_num):
+    csvs = sorted(glob.glob('tocom_data/*/*'))
+    cols = ('date', 'deal-type', 'commodity', 'contract-month', 'strike-price', 'open', 'high', 'low', 'close', 'settlement-price', 'volume', 'turnover')
+    df_return = pd.DataFrame()
+    for csv_f in csvs:
+        df = pd.read_csv(csv_f, names=cols)
+        df_com = df[df['commodity']==commodity_num]
+        df_add = df_com[['date', 'open', 'high', 'low', 'close']]
+        df_return = pd.concat([df_return, df_add])
+    df_return = df_return.dropna()
+    df_return = df_return.drop_duplicates(subset='date')
+    df_return = df_return.reset_index(drop=True)
+    return df_return
+
+def load_tocom(start, end, commodity_num=18, dates=None):
+    print('Loading TOCOM data...')
+    df = get_dateAndprice(commodity_num)
+    df['date'] = df['date'].astype(str)
+    if dates:
+        df = df[df['date'].isin(dates)]
+
+    start_idx = df[df['date']==start].index[0] if start else 0
+    end_idx = df[df['date']==end].index[0] if end else len(df)-1
+    start_loc = df.index.get_loc(start_idx)
+    end_loc = df.index.get_loc(end_idx)
+    df = df[start_loc:end_loc+1]
+    price = df['close'].astype(str)
+    chart = price.str.replace(',','').astype(float)
+    # chart = list(chart/max(chart))
+    chart = list(chart)
+    dates = list(df['date'])
+    return chart, dates
+
+
 
 
 
@@ -403,39 +428,81 @@ def run_test(env, agent, picture=0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--start', type=str, default='20140101')
-    parser.add_argument('--end', type=str, default='20190515')
+
+    parser.add_argument('--TRAIN', type=int, default=1)
+    parser.add_argument('--LOAD', type=int, default=0)
+    parser.add_argument('--save_interval', type=int, default=200000)
+    parser.add_argument('--save_name', type=str, default='test')
+
     parser.add_argument('--target', type=str, default='goldUSD')
     parser.add_argument('--features', nargs='*', default=[])
+    parser.add_argument('--start', type=str, default='19980106')
+    parser.add_argument('--end', type=str, default='20181010')
+
+    parser.add_argument('--spread', type=float, default=0)
+    parser.add_argument('--len_input', type=int, default=100)
+    parser.add_argument('--test_split', type=float, default=0.05)
+
+    parser.add_argument('--num_episodes', type=int, default=800)
+    parser.add_argument('--exploration_steps', type=int, default=2000000)
+    parser.add_argument('--initial_memory_size', type=int, default=10000)
+    parser.add_argument('--replay_memory_size', type=int, default=100000)
+    parser.add_argument('--target_update_interval', type=int, default=6000)
+    parser.add_argument('--act_interval', type=int, default=1)
+    parser.add_argument('--train_interval', type=int, default=1)
+    parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--epsilon_init', type=float, default=1)
+    parser.add_argument('--epsilon_fin', type=float, default=0.05)
+    parser.add_argument('--epsilon_test', type=float, default=0.05)
+
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--lr', type=int, default=0.00025)
+
 
     args = parser.parse_args()
+
+
+
     print(vars(args))
 
 
+
+
+    args.save_path = 'saved_networks/{}'.format(args.save_name)
+
+
+    if os.path.exists(args.save_path) or os.path.exists('log/{}.txt'.format(args.save_name)):
+        assert False, 'the file exists'
+
+    os.makedirs('log', exist_ok=True)
+    os.makedirs(args.save_path, exist_ok=True)
+
+
+    global f_log
+    f_log = open('log/{}.txt'.format(args.save_name), 'w')
+    f_log.write(str(vars(args))+'\n\n')
+
     print("Data Loading...")
-    # all len : 6155990, 2010 - len : 3091974
-    # chart = load_chart()
     chart, dates = load_chart(args.target, args.start, args.end)
-    num_train = int(len(chart)*0.9)
+    num_train = int(len(chart)*(1-args.test_split))
     features = []
     features_test = []
     for feature in args.features:
         print(feature)
         feature_chart, _ = load_chart(feature, args.start, args.end, dates=dates)
         features.append(feature_chart[:num_train])
-        features_test.append(feature_chart[num_train:])
+        features_test.append(feature_chart[num_train-args.len_input+1:])
 
     print("End!!")
 
     # print(max(chart), max(features[0]))
-    print(np.array(features).shape)
-    print(np.array(features_test).shape)
+
     print("num_train :", num_train)
-    env = Env(chart[:num_train], features, len_input, spread)
-    env_test = Env(chart[num_train:], features_test, len_input, spread)
-    agent = Agent(env.action_space.n, len_input, args)
-    if TRAIN:
-        for _ in range(num_episodes):
+    env = Env(chart[:num_train], features, args.len_input, args.spread)
+    env_test = Env(chart[num_train-args.len_input+1:], features_test, args.len_input, args.spread)
+    agent = Agent(env.action_space.n, args)
+    if args.TRAIN:
+        for _ in range(args.num_episodes):
             agent.start = time.time()
             terminal = False
             s = env.reset()
@@ -447,6 +514,9 @@ def main():
                 s = s_
             rewards = run_test(env_test,agent)
             print('Test reward:', rewards[-1])
+            # with open('log/{}.txt'.format(args.save_name),'a') as f:
+            f_log.write('Test reward: '+str(rewards[-1])+"\n")
+
 
     # env_test = Env(chart[num_train:], len_input, spread)
     #for _ in range(10):
