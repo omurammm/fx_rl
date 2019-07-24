@@ -1,6 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+#
+#  Train
+#  $
+#
+#  Test
+#  $ python dqn.py --TRAIN 0 --LOAD 1 --save_name plat_1step/plat_1step-3600000
+#
+#
+#
+
+
 import os
 import random
 from keras.models import Sequential, Model
@@ -15,7 +26,7 @@ import pandas as pd
 import datetime
 import argparse
 import glob
-
+from SumTree import SumTree
 
 # from logging import getLogger, StreamHandler, DEBUG, FileHandler
 # logger = getLogger('testtest')
@@ -29,14 +40,108 @@ import glob
 #
 # logger.debug('hello')
 
+#-------------------- MEMORY --------------------------
+class Memory:   # stored as ( s, a, r, s_ ) in SumTree
+    e = 0.01
+    a = 0.6
+
+    def __init__(self, capacity):
+        self.tree = SumTree(capacity)
+        self.max_p = 1
+
+    def _getPriority(self, error):
+        return (error + self.e) ** self.a
+
+    def add(self, error, sample):
+        p = self._getPriority(error)
+        self.tree.add(p, sample)
+
+    def add_p(self, p, sample):
+        self.tree.add(p, sample)
+
+
+    def sample(self, n):
+        batch = []
+        idx_batch = []
+        segment = self.tree.total() / n
+
+        for i in range(n):
+            a = segment * i
+            b = segment * (i + 1)
+
+            s = random.uniform(a, b)
+            (idx, p, data) = self.tree.get(s)
+            batch.append(data)
+            idx_batch.append(idx)
+
+        return batch, idx_batch
+
+    def update(self, idx, error):
+        p = self._getPriority(error)
+        if p > self.max_p:
+            self.max_p = p
+        self.tree.update(idx, p)
+
 
 
 class Agent:
-    def __init__(self, num_actions, args):
+    def __init__(self,
+                 args,
+                 num_actions,
+                 # frame_width = 84,  # Resized frame width
+                 # frame_height = 84,  # Resized frame height
+                 # state_length = 4,  # Number of most recent frames to produce the input to the network
+                 anealing_steps = 2000000, # Number of steps over which the initial value of epsilon is linearly annealed to its final value
+                 initial_epsilon = 1.0,  # Initial value of epsilon in epsilon-greedy
+                 final_epsilon = 0.05,  # Final value of epsilon in epsilon-greedy
+                 epsilon_test = 0.05,
+                 target_update_interval = 6000,  # The frequency with which the target network is updated
+                 act_interval = 1,  # The agent sees only every () input
+                 train_interval = 1,  # The agent selects 4 actions between successive updates
+                 batch_size = 32,  # Mini batch size
+                 lr = 0.00025,  # Learning rate used by RMSProp
+                 # MOMENTUM = 0.95  # Momentum used by RMSProp
+                 # MIN_GRAD = 0.01  # Constant added to the squared gradient in the denominator of the RMSProp update
+                 # save_interval = 300000,  # The frequency with which the network is saved
+                 # no_op_steps = 30,  # Maximum number of "do nothing" actions to be performed by the agent at the start of an episode
+                 # initial_beta = 0.4,
+                 ):
+
+        self.prioritized = args.prioritized
+        self.double = args.double
+        # self.dueling = args.dueling
+        self.n_step = args.n_step
+
+        self.initial_memory_size = args.initial_memory_size
+        self.replay_memory_size = args.replay_memory_size
+        self.gamma = args.gamma
+        self.gamma_n = args.gamma ** args.n_step
+
+
+
         self.num_actions = num_actions
         self.len_input = args.len_input
         self.num_features = 2+len(args.features)
 
+        # self.frame_width = frame_width
+        # self.frame_height = frame_height
+        # self.state_length = state_length
+        self.anealing_steps = anealing_steps
+        self.target_update_interval = target_update_interval
+        self.act_interval = act_interval
+        self.train_interval = train_interval
+        self.batch_size = batch_size
+        self.lr = lr
+        # self.no_op_steps = no_op_steps
+
+        self.epsilon = initial_epsilon
+        self.epsilon_fin = final_epsilon
+        self.epsilon_test = epsilon_test
+        self.anealing_by_step = (initial_epsilon - final_epsilon) / anealing_steps
+        # self.beta = initial_beta
+        # self.beta_step = (1 - initial_epsilon) / args.num_episodes
+        self.t = 0
+        self.repeated_action = 0
 
         self.save_name = args.save_name
         self.save_path = args.save_path
@@ -44,27 +149,6 @@ class Agent:
 
 
 
-        self.initial_memory_size = args.initial_memory_size
-        self.replay_memory_size = args.replay_memory_size
-
-        self.gamma = args.gamma
-        self.target_update_interval = args.target_update_interval
-        self.act_interval = args.act_interval
-        self.train_interval = args.train_interval
-        self.epsilon_init = args.epsilon_init
-        self.epsilon_fin = args.epsilon_fin
-        self.epsilon_test = args.epsilon_test
-
-        self.epsilon = args.epsilon_init
-        self.epsilon_step = (self.epsilon_init - self.epsilon_fin) / args.exploration_steps
-        self.t = 0
-        self.repeated_action = 0
-        self.exploration_steps = args.exploration_steps
-
-
-
-        self.batch_size = args.batch_size
-        self.lr = args.lr
 
 
         # Parameters used for summary
@@ -75,38 +159,60 @@ class Agent:
         self.episode = 0
 
         self.start = 0
-        
-        self.replay_memory = deque()
-        
-        self.s, self.q_values, q_network = self.network()
+
+        # Create replay memory
+        #self.replay_memory = deque()
+
+        if self.prioritized:
+            self.memory = Memory(args.replay_memory_size)
+        else:
+            self.memory = deque()
+
+        self.buffer = []
+        self.R = 0
+
+        # Dueling Network
+        # if self.dueling:
+        #     # Create q network
+        #     self.s, self.q_values, q_network = self.build_dueling_network()
+        #     q_network_weights = q_network.trainable_weights
+        #
+        #     # Create target network
+        #     self.st, self.target_q_values, target_network = self.build_dueling_network()
+        #     target_network_weights = target_network.trainable_weights
+        #
+        # else:
+
+        # Create q network
+        self.s, self.q_values, q_network = self.build_network()
         q_network_weights = q_network.trainable_weights
-        
-        self.st, self.target_q_values, target_network = self.network()
+
+        # Create target network
+        self.st, self.target_q_values, target_network = self.build_network()
         target_network_weights = target_network.trainable_weights
 
         # Define target network update operation
         self.update_target_network = [target_network_weights[i].assign(q_network_weights[i]) for i in range(len(target_network_weights))]
-        
-        
+
         # Define loss and gradient update operation
-        self.action, self.y, self.loss, self.grad_update = self.training_op(q_network_weights)
-        
+        self.a, self.y, self.error, self.loss, self.grad_update = self.build_training_op(q_network_weights)
+
         self.sess = tf.InteractiveSession()
 
-        self.saver = tf.train.Saver(q_network_weights)
 
         self.sess.run(tf.global_variables_initializer())
+        self.saver = tf.train.Saver(q_network_weights)
 
-        # Load network
+
         if args.LOAD:
             self.load_network()
 
 
         # Initialize target network
         self.sess.run(self.update_target_network)
+
         
-        
-    def network(self):
+    def build_network(self):
         # model = Sequential()
         # model.add(Dense(400, activation='relu', input_dim=self.len_input))
         # model.add(Dense(300, activation='relu'))
@@ -121,26 +227,34 @@ class Agent:
         q_values = model(s)
         
         return s, q_values, model
-    
-    def training_op(self, q_network_weights):
-        action = tf.placeholder(tf.int64, [None])
+
+    def huber_loss(self, x, delta=1.0):
+        return tf.where(
+            tf.abs(x) < delta,
+            tf.square(x) * 0.5,
+            delta * (tf.abs(x) - 0.5 * delta)
+        )
+
+    def build_training_op(self, q_network_weights):
+        a = tf.placeholder(tf.int64, [None])
         y = tf.placeholder(tf.float32, [None])
+        #w = tf.placeholder(tf.float32, [None])
 
         # Convert action to one hot vector. shape=(BATCH_SIZE, num_actions)
-        action_one_hot = tf.one_hot(action, self.num_actions, 1.0, 0.0)
-        #shape = (BATCH_SIZE,)
-        q_value = tf.reduce_sum(tf.multiply(self.q_values, action_one_hot), reduction_indices=1)
+        a_one_hot = tf.one_hot(a, self.num_actions, 1.0, 0.0)
+        # shape = (BATCH_SIZE,)
+        q_value = tf.reduce_sum(tf.multiply(self.q_values, a_one_hot), reduction_indices=1)
 
         # Clip the error, the loss is quadratic when the error is in (-1, 1), and linear outside of that region
-        error = tf.abs(y - q_value)
-        quadratic_part = tf.clip_by_value(error, 0.0, 1.0)
-        linear_part = error - quadratic_part
-        loss = tf.reduce_mean(0.5 * tf.square(quadratic_part) + linear_part)
+        td_error = y - q_value
+        errors = self.huber_loss(td_error)
+        loss = tf.reduce_mean(errors)
+        # error_is = (w / tf.reduce_max(w)) * error
 
-        optimizer = tf.train.RMSPropOptimizer(self.lr, momentum=0.95, epsilon=1.5e-7)
+        optimizer = tf.train.RMSPropOptimizer(self.lr, momentum=0.95, epsilon=0.01)
         grad_update = optimizer.minimize(loss, var_list=q_network_weights)
 
-        return action, y, loss, grad_update
+        return a, y, tf.abs(td_error), loss, grad_update
 
         
     def get_action(self, s):
@@ -164,45 +278,110 @@ class Agent:
         return action
 
     def load_network(self):
-        checkpoint = tf.train.get_checkpoint_state(self.save_path)
-        if checkpoint and checkpoint.model_checkpoint_path:
-            self.saver.restore(self.sess, checkpoint.model_checkpoint_path)
-            print('Successfully loaded: ' + checkpoint.model_checkpoint_path)
+        if os.path.isdir(self.save_path):
+            checkpoint = tf.train.get_checkpoint_state(self.save_path)
+            if checkpoint and checkpoint.model_checkpoint_path:
+                self.saver.restore(self.sess, checkpoint.model_checkpoint_path)
+                print('Successfully loaded: ' + checkpoint.model_checkpoint_path)
+            else:
+                print('Training new network...')
         else:
-            print('Training new network...')
+            self.saver.restore(self.sess, self.save_path)
+            print('Successfully loaded: ' + self.save_path)
+
+
+
         
-    def run(self, s, action, R, terminal, s_):
+    def run(self, state, action, reward, terminal, next_state):
         # print(self.t,"\r")
+        # print(reward)
 
-        self.total_reward += R
+        # Clip all positive rewards at 1 and all negative rewards at -1, leaving 0 rewards unchanged
+        raw_reward = reward
+        reward = np.sign(reward)
 
-        R = np.sign(R)
+        if (not self.prioritized) and len(self.memory) > self.replay_memory_size:
+            self.memory.popleft()
 
-        self.replay_memory.append((s, action, R, s_, terminal))
-        if len(self.replay_memory) > self.replay_memory_size:
-            self.replay_memory.popleft()
-            
+        #if self.t < INITIAL_REPLAY_SIZE:
+        #self.memory.add(1, (state, action, reward, next_state, terminal))
+        self.buffer.append((state, action, reward, next_state, terminal))
+
+        self.R = (self.R + reward * self.gamma_n) / self.gamma
+        # print(self.R, reward, action)
+        #print(self.memory.tree.tree[199:])
+        #print(self.memory.max_p)
+        if self.t < self.initial_memory_size:
+            if terminal:      # terminal state
+                while len(self.buffer) > 0:
+                    n = len(self.buffer)
+                    s, a, r, s_, done= self.get_sample(n)
+                    if self.prioritized:
+                        self.memory.add_p(self.memory.max_p, (s, a, r, s_, done))
+                    else:
+                        self.memory.append((s, a, r, s_, done))
+                    self.R = (self.R - self.buffer[0][2]) / self.gamma
+                    self.buffer.pop(0)
+                self.R = 0
+
+            if len(self.buffer) >= self.n_step:
+                s, a, r, s_, done = self.get_sample(self.n_step)
+                if self.prioritized:
+                    self.memory.add_p(self.memory.max_p, (s, a, r, s_, done))
+                else:
+                    self.memory.append((s, a, r, s_, done))
+                self.R = self.R - self.buffer[0][2]
+                self.buffer.pop(0)
+
+
+
         if self.t >= self.initial_memory_size:
-            if self.t % self.train_interval == 0:
-                self.train()
 
+            if terminal:      # terminal state
+                while len(self.buffer) > 0:
+                    n = len(self.buffer)
+                    s, a, r, s_, done= self.get_sample(n)
+                    if self.prioritized:
+                        self.memory.add_p(self.memory.max_p, (s, a, r, s_, done))
+                    else:
+                        self.memory.append((s, a, r, s_, done))
+                    self.R = (self.R - self.buffer[0][2]) / self.gamma
+                    self.buffer.pop(0)
+                self.R = 0
+
+            if len(self.buffer) >= self.n_step:
+                s, a, r, s_, done = self.get_sample(self.n_step)
+                if self.prioritized:
+                    self.memory.add_p(self.memory.max_p, (s, a, r, s_, done))
+                else:
+                    self.memory.append((s, a, r, s_, done))
+                self.R = self.R - self.buffer[0][2]
+                self.buffer.pop(0)
+
+            # Train network
+            if self.t % self.train_interval == 0:
+                self.train_network()
+
+            # Update target network
             if self.t % self.target_update_interval == 0:
-                self.sess.run(self.update_target_network)
+                print("update",len(self.sess.run(self.update_target_network)))
 
             # Save network
             if self.t % self.save_interval == 0:
                 path = self.saver.save(self.sess, self.save_path+'/'+self.save_name, global_step=(self.t))
                 print('Successfully saved: ' + path)
 
-        self.total_max_q += np.max(self.q_values.eval(feed_dict={self.s: [np.float32(s)]}))
-        self.duration += 1          
-  
+        self.total_reward += raw_reward
+        self.total_max_q += np.max(self.q_values.eval(feed_dict={self.s: [np.float32(state)]}))
+        self.duration += 1
+###
+
         if terminal:
             #Debug
             elapsed = time.time() - self.start
             if self.t < self.initial_memory_size:
                 mode = 'random'
-            elif self.initial_memory_size <= self.t < self.initial_memory_size + self.exploration_steps:
+            elif self.initial_memory_size <= self.t < self.initial_memory_size + self.anealing_steps:
                 mode = 'explore'
             else:
                 mode = 'exploit'
@@ -224,38 +403,84 @@ class Agent:
 
         self.t += 1
         if self.epsilon > self.epsilon_fin and self.t >= self.initial_memory_size:
-            self.epsilon -= self.epsilon_step
-            
-    def train(self):
-        s_batch = []
-        action_batch = []
-        R_batch = []
-        next_s_batch = []
-        terminal_batch = []
-        y_batch = []
+            self.epsilon -= self.anealing_by_step
 
-        # Sample random minibatch of transition from replay memory
-        minibatch = random.sample(self.replay_memory, self.batch_size)
+
+    def train_network(self):
+        state_batch = []
+        action_batch = []
+        reward_batch = []
+        next_state_batch = []
+        terminal_batch = []
+        w_batch = []
+
+        if self.prioritized:
+            minibatch, idx_batch = self.memory.sample(self.batch_size)
+        else:
+            minibatch = random.sample(self.memory, self.batch_size)
+
         for data in minibatch:
-            s_batch.append(data[0])
+            state_batch.append(data[0])
             action_batch.append(data[1])
-            R_batch.append(data[2])
-            next_s_batch.append(data[3])
+            reward_batch.append(data[2])
+            #shape = (BATCH_SIZE, 4, 32, 32)
+            next_state_batch.append(data[3])
             terminal_batch.append(data[4])
 
         # Convert True to 1, False to 0
         terminal_batch = np.array(terminal_batch) + 0
-        target_q_values_batch = self.target_q_values.eval(feed_dict={self.st: np.float32(np.array(next_s_batch))})
-        y_batch = R_batch + (1 - terminal_batch) * self.gamma * np.max(target_q_values_batch, axis=1)
-        loss, _ = self.sess.run([self.loss, self.grad_update], feed_dict={
-            self.s: np.float32(np.array(s_batch)),
-            self.action: action_batch,
+        target_q_values_batch = self.target_q_values.eval(feed_dict={self.st: np.float32(np.array(next_state_batch))})
+
+        # DDQN
+        if self.double:
+            actions = np.argmax(self.q_values.eval(feed_dict={self.s: np.float32(np.array(next_state_batch))}), axis=1)
+            target_q_values_batch = np.array([target_q_values_batch[i][action] for i, action in enumerate(actions)])
+            y_batch = reward_batch + (1 - terminal_batch) * self.gamma_n * target_q_values_batch
+        else:
+            y_batch = reward_batch + (1 - terminal_batch) * self.gamma * np.max(target_q_values_batch, axis=1)
+
+        # IS weight
+        #for idx in idx_batch:
+        #    wi = (NUM_REPLAY_MEMORY * self.memory.tree.tree[idx])**(-self.beta)
+        #    w_batch.append(wi)
+
+        error_batch = self.error.eval(feed_dict={
+            self.s: np.float32(np.array(state_batch)),
+            self.a: action_batch,
             self.y: y_batch
         })
 
+        #error_is_batch = self.error_is.eval(feed_dict={
+        #   self.a: action_batch,
+        #    self.y: y_batch,
+        #    self.w: w_batch
+        #})
+
+        # Memory update
+        if self.prioritized:
+            for i in range(self.batch_size):
+                self.memory.update(idx_batch[i],error_batch[i])
+
+        loss, _ = self.sess.run([self.loss, self.grad_update], feed_dict={
+            self.s: np.float32(np.array(state_batch)),
+            self.a: action_batch,
+            self.y: y_batch
+            #self.w: w_batch
+        })
+
+        # print(reward_batch)
+
+
         self.total_loss += loss
 
-        
+    def get_sample(self, n):
+        s, a, _, _, _ = self.buffer[0]
+        _, _, _, s_, done = self.buffer[n-1]
+
+        return s, a, self.R, s_, done
+
+
+
 
 
 def load_chart(target, start, end, dates=None):
@@ -386,16 +611,25 @@ def load_tocom(start, end, commodity_num=18, dates=None):
     # chart = list(chart/max(chart))
     chart = list(chart)
     dates = list(df['date'])
+
+    # pad 0 with 1 before value
+    for i in range(len(chart)):
+        if chart[i] ==0:
+            chart[i]=chart[i-1]
+    if 0 in chart:
+        assert False, 'Data includes 0'
+    print(commodity_num,'len :',len(chart))
     return chart, dates
 
 
 
 
 
-def plot_pips(rewards):
+def plot_pips(rewards, filename):
     rewards = np.array(rewards)
-    plt.plot(rewards)
-    plt.savefig('pips')
+    for i in range(len(rewards)):
+        plt.plot(rewards[i])
+    plt.savefig(filename)
     plt.show()
 
 
@@ -434,7 +668,7 @@ def main():
     parser.add_argument('--save_interval', type=int, default=200000)
     parser.add_argument('--save_name', type=str, default='test')
 
-    parser.add_argument('--target', type=str, default='goldUSD')
+    parser.add_argument('--target', type=str, default='11')
     parser.add_argument('--features', nargs='*', default=[])
     parser.add_argument('--start', type=str, default='19980106')
     parser.add_argument('--end', type=str, default='20181010')
@@ -442,21 +676,23 @@ def main():
     parser.add_argument('--spread', type=float, default=0)
     parser.add_argument('--len_input', type=int, default=100)
     parser.add_argument('--test_split', type=float, default=0.05)
+    parser.add_argument('--series', type=str, default='diff')
 
-    parser.add_argument('--num_episodes', type=int, default=800)
-    parser.add_argument('--exploration_steps', type=int, default=2000000)
-    parser.add_argument('--initial_memory_size', type=int, default=10000)
-    parser.add_argument('--replay_memory_size', type=int, default=100000)
-    parser.add_argument('--target_update_interval', type=int, default=6000)
-    parser.add_argument('--act_interval', type=int, default=1)
-    parser.add_argument('--train_interval', type=int, default=1)
-    parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--epsilon_init', type=float, default=1)
-    parser.add_argument('--epsilon_fin', type=float, default=0.05)
-    parser.add_argument('--epsilon_test', type=float, default=0.05)
 
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--lr', type=int, default=0.00025)
+    parser.add_argument('--prioritized', type=int, default=1, help='prioritized experience replay')
+    parser.add_argument('--double', type=int, default=1, help='Double-DQN')
+    # parser.add_argument('--dueling', type=int, default=1, help='Dueling Network')
+    parser.add_argument('--n_step', type=int, default=3, help='n step bootstrap target')
+    # parser.add_argument('--env_name', type=str, default='Alien-v0', help='Environment of Atari2600 games')
+    # parser.add_argument('--train', type=int, default=1, help='train mode or test mode')
+    # parser.add_argument('--gui', type=int, default=0, help='decide whether you use GUI or not')
+    # parser.add_argument('--load', type=int, default=0, help='loading saved network')
+    # parser.add_argument('--network_path', type=str, default=0, help='used in loading and saving (default: \'saved_networks/<env_name>\')')
+    parser.add_argument('--replay_memory_size', type=int, default=100000, help='replay memory size')
+    parser.add_argument('--initial_memory_size', type=int, default=50000, help='Learner waits until replay memory stores this number of transition')
+    parser.add_argument('--num_episodes', type=int, default=800, help='number of episodes each agent plays')
+    parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
+
 
 
     args = parser.parse_args()
@@ -471,24 +707,28 @@ def main():
     args.save_path = 'saved_networks/{}'.format(args.save_name)
 
 
-    if os.path.exists(args.save_path) or os.path.exists('log/{}.txt'.format(args.save_name)):
-        assert False, 'the file exists'
+    if not args.LOAD:
+        if (os.path.exists(args.save_path) or os.path.exists('log/{}.txt'.format(args.save_name))):
+            assert False, 'the file exists'
 
-    os.makedirs('log', exist_ok=True)
-    os.makedirs(args.save_path, exist_ok=True)
+        os.makedirs('log', exist_ok=True)
+        os.makedirs(args.save_path, exist_ok=True)
 
 
     global f_log
-    f_log = open('log/{}.txt'.format(args.save_name), 'w')
+    f_log_name = 'log/{}.txt'.format(args.save_name)
+    os.makedirs(os.path.dirname(f_log_name), exist_ok=True)
+    f_log = open(f_log_name, 'w')
     f_log.write(str(vars(args))+'\n\n')
 
     print("Data Loading...")
+    print('target:', args.target)
     chart, dates = load_chart(args.target, args.start, args.end)
     num_train = int(len(chart)*(1-args.test_split))
     features = []
     features_test = []
     for feature in args.features:
-        print(feature)
+        print('feature:', feature)
         feature_chart, _ = load_chart(feature, args.start, args.end, dates=dates)
         features.append(feature_chart[:num_train])
         features_test.append(feature_chart[num_train-args.len_input+1:])
@@ -498,9 +738,9 @@ def main():
     # print(max(chart), max(features[0]))
 
     print("num_train :", num_train)
-    env = Env(chart[:num_train], features, args.len_input, args.spread)
-    env_test = Env(chart[num_train-args.len_input+1:], features_test, args.len_input, args.spread)
-    agent = Agent(env.action_space.n, args)
+    env = Env(chart[:num_train], features, args.len_input, args.spread, series=args.series)
+    env_test = Env(chart[num_train-args.len_input+1:], features_test, args.len_input, args.spread, series=args.series)
+    agent = Agent(args, env.action_space.n)
     if args.TRAIN:
         for _ in range(args.num_episodes):
             agent.start = time.time()
@@ -520,17 +760,22 @@ def main():
 
     # env_test = Env(chart[num_train:], len_input, spread)
     #for _ in range(10):
-    terminal = False
-    s = env_test.reset()
-    rewards = [0]
 
-    while not terminal:
-        action = agent.test_get_action(s)
-        s_, R, terminal = env_test.step(action)
-        rewards.append(rewards[-1]+R)
-        agent.run(s, action, R, terminal, s_)
-        s = s_
-    plot_pips(rewards)
+
+    rewards_all = []
+
+    for _ in range(10):
+        rewards = [0]
+        s = env_test.reset()
+        terminal = False
+        while not terminal:
+            action = agent.test_get_action(s)
+            s_, R, terminal = env_test.step(action)
+            rewards.append(rewards[-1]+R)
+            agent.run(s, action, R, terminal, s_)
+            s = s_
+        rewards_all.append(rewards)
+    plot_pips(rewards_all, 'log/'+args.save_name)
 
 if __name__ == '__main__':
     main()
